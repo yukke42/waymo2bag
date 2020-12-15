@@ -12,7 +12,7 @@ Convert [WAYMO Open  Dataset](https://waymo.com/open/) dataset to ROS bag file t
 
 ## Setup
 
-Download or create `waymo_open_dataset` package for Python2, because only packages for Python3 are provided officially. 
+Download from here or create `waymo_open_dataset` package for Python2, because packages for Python3 are only provided officially. 
 
 
 
