@@ -69,14 +69,6 @@ docker run \
 
 
 
-if you want to change file owner:
-
-```
-sudo chown $USER:$USER -R rosbag
-```
-
-
-
 ## Reference
 
  * [tomas789/kitti2bag](https://github.com/tomas789/kitti2bag)
