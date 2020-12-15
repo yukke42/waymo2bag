@@ -35,7 +35,7 @@ mv /path/to/waymo_open_dataset_tf_2_0_0-1.2.0-cp27-cp27mu-manylinux2010_x86_64.w
 
 
 
-build docker:
+build docker for waymo2bag:
 
 ```
 docker build -f docker/Dockerfile -t waymo2bag .
