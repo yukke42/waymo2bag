@@ -1,3 +1,3 @@
 #!/bin/bash
 
-docker build -t waymo2bag .
+docker build -f docker/Dockerfile -t waymo2bag .

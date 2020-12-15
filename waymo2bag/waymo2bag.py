@@ -9,6 +9,7 @@ import rospy
 import sensor_msgs.point_cloud2 as pcl2
 import tensorflow
 import tf
+import tqdm
 from geometry_msgs.msg import TransformStamped
 from sensor_msgs.msg import PointField
 from std_msgs.msg import Header
@@ -31,57 +32,47 @@ SELECTED_LIDAR_SENSOR = [
 ]
 
 # The value in the waymo open dataset is the raw intensity
+# https://github.com/waymo-research/waymo-open-dataset/issues/93
 NORMALIZE_INTENSITY = True
 
-# Note: disable GPU
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 
 class Waymo2Bag(object):
 
-    def __init__(self, load_dir, save_dir, num_workers):
+    def __init__(self, load_dir, save_dir):
         # turn on eager execution for older tensorflow versions
         if int(tensorflow.__version__.split('.')[0]) < 2:
             tensorflow.enable_eager_execution()
 
         self.load_dir = load_dir
         self.save_dir = save_dir
-        self.num_workers = num_workers
-
-        # tfrecord_file = 'tfrecord/segment-17612470202990834368_2800_000_2820_000_with_camera_labels.tfrecord'
-        # tfrecord_file = 'tfrecord/segment-10448102132863604198_472_000_492_000_with_camera_labels.tfrecord'
-        # tfrecord_file = 'tfrecord/segment-12940710315541930162_2660_000_2680_000_with_camera_labels.tfrecord'
-        # self.tfrecord_pathnames = [tfrecord_file]
-        self.tfrecord_pathnames = glob.glob('tfrecord/*.tfrecord')
+        self.tfrecord_pathnames = sorted(glob.glob('tfrecord/*.tfrecord'))
 
     def __len__(self):
         return len(self.tfrecord_pathnames)
 
     def convert(self):
         print("start converting ...")
-        # with Pool(self.num_workers) as p:
-        #     list(tqdm.tqdm(p.imap(self.convert_tfrecord2bag, range(len(self))), total=len(self)))
         for i in range(len(self)):
             self.convert_tfrecord2bag(i)
-        print("\nfinished ...")
+        print("finished ...")
 
     def convert_tfrecord2bag(self, file_idx):
         pathname = self.tfrecord_pathnames[file_idx]
         dataset = tensorflow.data.TFRecordDataset(pathname, compression_type='')
-        len_dataset = len(list(dataset))
+        dataset = list(dataset)
 
         filename = os.path.basename(pathname).split('.')[0]
         bag = rosbag.Bag('rosbag/' + str(filename) + '.bag', 'w', compression=rosbag.Compression.NONE)
+        print("filename: %s" % str(filename))
 
         try:
-            for frame_idx, data in enumerate(dataset):
-                print('{} {}/{}'.format(file_idx, frame_idx, len_dataset))
-
+            for frame_idx, data in enumerate(tqdm.tqdm(dataset)):
                 frame = dataset_pb2.Frame()
                 frame.ParseFromString(bytearray(data.numpy()))
 
                 timestamp = rospy.Time.from_sec(frame.timestamp_micros * 1e-6)
-
                 self.write_tf(bag, frame, timestamp)
                 self.write_point_cloud(bag, frame, timestamp)
 
@@ -116,7 +107,7 @@ class Waymo2Bag(object):
         Tr_vehicle2world = np.array(frame.pose.transform).reshape(4, 4)
 
         transforms = [
-            ('/world', '/base_link', np.linalg.inv(Tr_vehicle2world)),
+            ('/world', '/base_link', Tr_vehicle2world),
             ('/base_link', '/velodyne', np.eye(4)),
         ]
 
@@ -155,7 +146,7 @@ class Waymo2Bag(object):
         if NORMALIZE_INTENSITY:
             intensity = np.tanh(intensity)
 
-        # concatenate x,y,z and intensity
+        # concatenate x, y, z and intensity
         point_cloud = np.column_stack((points, intensity))
 
         header = Header()
@@ -176,8 +167,9 @@ def convert_range_image_to_point_cloud(frame,
                                        camera_projections,
                                        range_image_top_pose,
                                        ri_indexes=(0, 1)):
-    """Convert range images to point cloud.
-    modified from https://github.com/waymo-research/waymo-open-dataset/blob/master/waymo_open_dataset/utils/range_image_utils.py#L612
+    """Convert range images to point cloud. modified from
+    https://github.com/waymo-research/waymo-open-dataset/blob/master/waymo_open_dataset/utils/range_image_utils.py#L612
+
     Args:
       frame: open dataset frame
        range_images: A dict of {laser_name, [range_image_first_return,
@@ -256,7 +248,7 @@ def convert_range_image_to_point_cloud(frame,
 
             ret_dict['points{}'.format(ri_index)].append(points_tensor.numpy())
 
-            # Note: channel 1: intensity
+            # Note: channel 1 is intensity
             # https://github.com/waymo-research/waymo-open-dataset/blob/master/waymo_open_dataset/dataset.proto#L176
             intensity_tensor = tf.gather_nd(range_image_tensor[..., 1], tf.where(range_image_mask))
             ret_dict['intensity{}'.format(ri_index)].append(intensity_tensor.numpy())
@@ -264,12 +256,11 @@ def convert_range_image_to_point_cloud(frame,
     return ret_dict
 
 
-if __name__ == '__main__':
+def waymo2bag():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--load_dir', help='Directory to load Waymo Open Dataset tfrecords')
-    parser.add_argument('--save_dir', help='Directory to save converted KITTI-format data')
-    parser.add_argument('--num_workers', default=16, type=int, help='Number of processes to spawn')
+    parser.add_argument('--load_dir', help='directory to load Waymo Open Dataset tfrecords')
+    parser.add_argument('--save_dir', help='directory to save converted rosbag data')
     args = parser.parse_args()
 
-    converter = Waymo2Bag(args.load_dir, args.save_dir, args.num_workers)
+    converter = Waymo2Bag(args.load_dir, args.save_dir)
     converter.convert()
