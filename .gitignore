@@ -1,5 +1,4 @@
 waymo-od/
-pip_pkg_build/
 
 *.tfrecord
 *.bag
