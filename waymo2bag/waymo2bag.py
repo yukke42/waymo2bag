@@ -1,21 +1,22 @@
 import argparse
+from collections import defaultdict
 import glob
 import os
-from collections import defaultdict
 
+from geometry_msgs.msg import TransformStamped
 import numpy as np
-import rosbag
 import rospy
+from sensor_msgs.msg import PointField
 import sensor_msgs.point_cloud2 as pcl2
+from std_msgs.msg import Header
 import tensorflow
 import tf
-import tqdm
-from geometry_msgs.msg import TransformStamped
-from sensor_msgs.msg import PointField
-from std_msgs.msg import Header
 from tf2_msgs.msg import TFMessage
+import tqdm
 from waymo_open_dataset import dataset_pb2
 from waymo_open_dataset.utils import frame_utils, range_image_utils, transform_utils
+
+import rosbag
 
 # There is no bounding box annotations in the No Label Zone (NLZ)
 # if set True, points in the NLZ are filtered
@@ -39,15 +40,14 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 
 class Waymo2Bag(object):
-
     def __init__(self, load_dir, save_dir):
         # turn on eager execution for older tensorflow versions
-        if int(tensorflow.__version__.split('.')[0]) < 2:
+        if int(tensorflow.__version__.split(".")[0]) < 2:
             tensorflow.enable_eager_execution()
 
         self.load_dir = load_dir
         self.save_dir = save_dir
-        self.tfrecord_pathnames = sorted(glob.glob('tfrecord/*.tfrecord'))
+        self.tfrecord_pathnames = sorted(glob.glob("tfrecord/*.tfrecord"))
 
     def __len__(self):
         return len(self.tfrecord_pathnames)
@@ -60,11 +60,13 @@ class Waymo2Bag(object):
 
     def convert_tfrecord2bag(self, file_idx):
         pathname = self.tfrecord_pathnames[file_idx]
-        dataset = tensorflow.data.TFRecordDataset(pathname, compression_type='')
+        dataset = tensorflow.data.TFRecordDataset(pathname, compression_type="")
         dataset = list(dataset)
 
-        filename = os.path.basename(pathname).split('.')[0]
-        bag = rosbag.Bag('rosbag/' + str(filename) + '.bag', 'w', compression=rosbag.Compression.NONE)
+        filename = os.path.basename(pathname).split(".")[0]
+        bag = rosbag.Bag(
+            "rosbag/" + str(filename) + ".bag", "w", compression=rosbag.Compression.NONE
+        )
         print("filename: %s" % str(filename))
 
         try:
@@ -107,8 +109,8 @@ class Waymo2Bag(object):
         Tr_vehicle2world = np.array(frame.pose.transform).reshape(4, 4)
 
         transforms = [
-            ('/world', '/base_link', Tr_vehicle2world),
-            ('/base_link', '/velodyne', np.eye(4)),
+            ("/world", "/base_link", Tr_vehicle2world),
+            ("/base_link", "/velodyne", np.eye(4)),
         ]
 
         tf_message = TFMessage()
@@ -117,31 +119,30 @@ class Waymo2Bag(object):
                 from_frame_id=transform[0],
                 to_frame_id=transform[1],
                 stamp=timestamp,
-                trans_mat=transform[2]
+                trans_mat=transform[2],
             )
             tf_message.transforms.append(_tf_msg)
 
-        bag.write('/tf', tf_message, t=timestamp)
+        bag.write("/tf", tf_message, t=timestamp)
 
     def write_point_cloud(self, bag, frame, timestamp):
-        """ parse and save the lidar data in psd format
+        """parse and save the lidar data in psd format
         Args:
             bag (rosbag.Bag):
             frame (waymo_open_dataset.dataset_pb2.Frame):
             timestamp (rospy.rostime.Time): timestamp of a frame
         """
 
-        range_images, camera_projections, range_image_top_pose = \
-            frame_utils.parse_range_image_and_camera_projection(frame)
-        ret_dict = convert_range_image_to_point_cloud(
-            frame,
+        (
             range_images,
             camera_projections,
             range_image_top_pose,
-            ri_indexes=(0, 1)
+        ) = frame_utils.parse_range_image_and_camera_projection(frame)
+        ret_dict = convert_range_image_to_point_cloud(
+            frame, range_images, camera_projections, range_image_top_pose, ri_indexes=(0, 1)
         )
-        points = np.concatenate(ret_dict['points0'] + ret_dict['points1'], axis=0)
-        intensity = np.concatenate(ret_dict['intensity0'] + ret_dict['intensity1'], axis=0)
+        points = np.concatenate(ret_dict["points0"] + ret_dict["points1"], axis=0)
+        intensity = np.concatenate(ret_dict["intensity0"] + ret_dict["intensity1"], axis=0)
 
         if NORMALIZE_INTENSITY:
             intensity = np.tanh(intensity)
@@ -150,23 +151,23 @@ class Waymo2Bag(object):
         point_cloud = np.column_stack((points, intensity))
 
         header = Header()
-        header.frame_id = 'velodyne'
+        header.frame_id = "velodyne"
         header.stamp = timestamp
 
-        fields = [PointField('x', 0, PointField.FLOAT32, 1),
-                  PointField('y', 4, PointField.FLOAT32, 1),
-                  PointField('z', 8, PointField.FLOAT32, 1),
-                  PointField('intensity', 12, PointField.FLOAT32, 1)]
+        fields = [
+            PointField("x", 0, PointField.FLOAT32, 1),
+            PointField("y", 4, PointField.FLOAT32, 1),
+            PointField("z", 8, PointField.FLOAT32, 1),
+            PointField("intensity", 12, PointField.FLOAT32, 1),
+        ]
         pcl_msg = pcl2.create_cloud(header, fields, point_cloud)
 
-        bag.write('/points_raw', pcl_msg, t=pcl_msg.header.stamp)
+        bag.write("/points_raw", pcl_msg, t=pcl_msg.header.stamp)
 
 
-def convert_range_image_to_point_cloud(frame,
-                                       range_images,
-                                       camera_projections,
-                                       range_image_top_pose,
-                                       ri_indexes=(0, 1)):
+def convert_range_image_to_point_cloud(
+    frame, range_images, camera_projections, range_image_top_pose, ri_indexes=(0, 1)
+):
     """Convert range images to point cloud. modified from
     https://github.com/waymo-research/waymo-open-dataset/blob/master/waymo_open_dataset/utils/range_image_utils.py#L612
 
@@ -188,21 +189,20 @@ def convert_range_image_to_point_cloud(frame,
     calibrations = sorted(frame.context.laser_calibrations, key=lambda c: c.name)
     ret_dict = defaultdict(list)
 
-    frame_pose = tf.convert_to_tensor(
-        value=np.reshape(np.array(frame.pose.transform), [4, 4]))
+    frame_pose = tf.convert_to_tensor(value=np.reshape(np.array(frame.pose.transform), [4, 4]))
     # [H, W, 6]
     range_image_top_pose_tensor = tf.reshape(
-        tf.convert_to_tensor(value=range_image_top_pose.data),
-        range_image_top_pose.shape.dims)
+        tf.convert_to_tensor(value=range_image_top_pose.data), range_image_top_pose.shape.dims
+    )
     # [H, W, 3, 3]
     range_image_top_pose_tensor_rotation = transform_utils.get_rotation_matrix(
-        range_image_top_pose_tensor[..., 0], range_image_top_pose_tensor[..., 1],
-        range_image_top_pose_tensor[..., 2]
+        range_image_top_pose_tensor[..., 0],
+        range_image_top_pose_tensor[..., 1],
+        range_image_top_pose_tensor[..., 2],
     )
     range_image_top_pose_tensor_translation = range_image_top_pose_tensor[..., 3:]
     range_image_top_pose_tensor = transform_utils.get_transform(
-        range_image_top_pose_tensor_rotation,
-        range_image_top_pose_tensor_translation
+        range_image_top_pose_tensor_rotation, range_image_top_pose_tensor_translation
     )
 
     for c in calibrations:
@@ -213,7 +213,8 @@ def convert_range_image_to_point_cloud(frame,
             if len(c.beam_inclinations) == 0:
                 beam_inclinations = range_image_utils.compute_inclination(
                     tf.constant([c.beam_inclination_min, c.beam_inclination_max]),
-                    height=range_image.shape.dims[0])
+                    height=range_image.shape.dims[0],
+                )
             else:
                 beam_inclinations = tf.constant(c.beam_inclinations)
 
@@ -221,7 +222,8 @@ def convert_range_image_to_point_cloud(frame,
             extrinsic = np.reshape(np.array(c.extrinsic.transform), [4, 4])
 
             range_image_tensor = tf.reshape(
-                tf.convert_to_tensor(value=range_image.data), range_image.shape.dims)
+                tf.convert_to_tensor(value=range_image.data), range_image.shape.dims
+            )
             pixel_pose_local = None
             frame_pose_local = None
             if c.name == dataset_pb2.LaserName.TOP:
@@ -240,26 +242,28 @@ def convert_range_image_to_point_cloud(frame,
                 tf.expand_dims(extrinsic, axis=0),
                 tf.expand_dims(tf.convert_to_tensor(value=beam_inclinations), axis=0),
                 pixel_pose=pixel_pose_local,
-                frame_pose=frame_pose_local
+                frame_pose=frame_pose_local,
             )
 
             range_image_cartesian = tf.squeeze(range_image_cartesian, axis=0)
-            points_tensor = tf.gather_nd(range_image_cartesian, tf.compat.v1.where(range_image_mask))
+            points_tensor = tf.gather_nd(
+                range_image_cartesian, tf.compat.v1.where(range_image_mask)
+            )
 
-            ret_dict['points{}'.format(ri_index)].append(points_tensor.numpy())
+            ret_dict["points{}".format(ri_index)].append(points_tensor.numpy())
 
             # Note: channel 1 is intensity
             # https://github.com/waymo-research/waymo-open-dataset/blob/master/waymo_open_dataset/dataset.proto#L176
             intensity_tensor = tf.gather_nd(range_image_tensor[..., 1], tf.where(range_image_mask))
-            ret_dict['intensity{}'.format(ri_index)].append(intensity_tensor.numpy())
+            ret_dict["intensity{}".format(ri_index)].append(intensity_tensor.numpy())
 
     return ret_dict
 
 
 def waymo2bag():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--load_dir', help='directory to load Waymo Open Dataset tfrecords')
-    parser.add_argument('--save_dir', help='directory to save converted rosbag data')
+    parser.add_argument("--load_dir", help="directory to load Waymo Open Dataset tfrecords")
+    parser.add_argument("--save_dir", help="directory to save converted rosbag data")
     args = parser.parse_args()
 
     converter = Waymo2Bag(args.load_dir, args.save_dir)

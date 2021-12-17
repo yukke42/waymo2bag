@@ -1,8 +1,10 @@
 waymo-od/
 pip_pkg_build/
 
-*tfrecord
+*.tfrecord
 *.bag
+*.db3
+metadata.yaml
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
