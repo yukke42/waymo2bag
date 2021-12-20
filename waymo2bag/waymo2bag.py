@@ -3,11 +3,12 @@ from collections import defaultdict
 import glob
 import os
 
+import cv2
 from geometry_msgs.msg import TransformStamped
 import numpy as np
 import rospy
-from sensor_msgs.msg import PointField
-import sensor_msgs.point_cloud2 as pcl2
+from sensor_msgs.msg import Image, PointField
+import sensor_msgs.point_cloud2 as point_cloud2
 from std_msgs.msg import Header
 import tensorflow
 import tf
@@ -24,13 +25,13 @@ FILTER_NO_LABEL_ZONE_POINTS = False
 
 # The dataset contains data from five lidars
 # one mid-range lidar (top) and four short-range lidars (front, side left, side right, and rear)
-SELECTED_LIDAR_SENSOR = [
-    dataset_pb2.LaserName.TOP,
-    # dataset_pb2.LaserName.FRONT,
-    # dataset_pb2.LaserName.SIDE_LEFT,
-    # dataset_pb2.LaserName.SIDE_RIGHT,
-    # dataset_pb2.LaserName.REAR,
-]
+SELECTED_LIDAR_SENSOR = {
+    dataset_pb2.LaserName.TOP: "top",
+    dataset_pb2.LaserName.FRONT: "front",
+    dataset_pb2.LaserName.SIDE_LEFT: "side_left",
+    dataset_pb2.LaserName.SIDE_RIGHT: "side_right",
+    dataset_pb2.LaserName.REAR: "rear",
+}
 
 # The value in the waymo open dataset is the raw intensity
 # https://github.com/waymo-research/waymo-open-dataset/issues/93
@@ -77,7 +78,7 @@ class Waymo2Bag(object):
                 timestamp = rospy.Time.from_sec(frame.timestamp_micros * 1e-6)
                 self.write_tf(bag, frame, timestamp)
                 self.write_point_cloud(bag, frame, timestamp)
-
+                self.write_image(bag, frame, timestamp)
         finally:
             print(bag)
             bag.close()
@@ -90,7 +91,13 @@ class Waymo2Bag(object):
             timestamp (rospy.rostime.Time): timestamp of a frame
         """
 
-        def get_static_transform(from_frame_id, to_frame_id, stamp, trans_mat):
+        Tr_vehicle2world = np.array(frame.pose.transform).reshape(4, 4)
+
+        transforms = [
+            ("map", "base_link", Tr_vehicle2world),
+        ]
+
+        def to_transform(from_frame_id, to_frame_id, stamp, trans_mat):
             t = tf.transformations.translation_from_matrix(trans_mat)
             q = tf.transformations.quaternion_from_matrix(trans_mat)
             tf_msg = TransformStamped()
@@ -106,16 +113,9 @@ class Waymo2Bag(object):
             tf_msg.transform.rotation.w = q[3]
             return tf_msg
 
-        Tr_vehicle2world = np.array(frame.pose.transform).reshape(4, 4)
-
-        transforms = [
-            ("/world", "/base_link", Tr_vehicle2world),
-            ("/base_link", "/velodyne", np.eye(4)),
-        ]
-
         tf_message = TFMessage()
         for transform in transforms:
-            _tf_msg = get_static_transform(
+            _tf_msg = to_transform(
                 from_frame_id=transform[0],
                 to_frame_id=transform[1],
                 stamp=timestamp,
@@ -124,6 +124,33 @@ class Waymo2Bag(object):
             tf_message.transforms.append(_tf_msg)
 
         bag.write("/tf", tf_message, t=timestamp)
+
+    def write_image(self, bag, frame, timestamp):
+        """
+        Args:
+            bag (rosbag.Bag): bag to write
+            frame (waymo_open_dataset.dataset_pb2.Frame): frame info
+            timestamp (rospy.rostime.Time): timestamp of a frame
+        """
+        for image in frame.images:
+            frame_name = dataset_pb2.CameraName.Name.Name(image.name).lower()
+
+            img_bgr = cv2.imdecode(np.frombuffer(image.image, np.uint8), cv2.IMREAD_COLOR)
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+
+            # image_msg = CompressedImage()
+            # image_msg.header = Header(frame_id=frame_name, stamp=timestamp)
+            # image_msg.format = "jpeg"
+            # image_msg.data = np.array(cv2.imencode('.jpg', img_rgb)[1]).tostring()
+
+            image_msg = Image()
+            image_msg.header = Header(frame_id=frame_name, stamp=timestamp)
+            image_msg.height = img_rgb.shape[0]
+            image_msg.width = img_rgb.shape[1]
+            image_msg.encoding = "rgb8"
+            image_msg.data = img_rgb.tostring()
+
+            bag.write("/camera/{}/image".format(frame_name), image_msg, t=timestamp)
 
     def write_point_cloud(self, bag, frame, timestamp):
         """parse and save the lidar data in psd format
@@ -141,28 +168,45 @@ class Waymo2Bag(object):
         ret_dict = convert_range_image_to_point_cloud(
             frame, range_images, camera_projections, range_image_top_pose, ri_indexes=(0, 1)
         )
-        points = np.concatenate(ret_dict["points0"] + ret_dict["points1"], axis=0)
-        intensity = np.concatenate(ret_dict["intensity0"] + ret_dict["intensity1"], axis=0)
 
-        if NORMALIZE_INTENSITY:
-            intensity = np.tanh(intensity)
+        def write_points_to_bag(points, lidar_name):
+            # pointcloud is already transformed to base_link
 
-        # concatenate x, y, z and intensity
-        point_cloud = np.column_stack((points, intensity))
+            fields = [
+                PointField("x", 0, PointField.FLOAT32, 1),
+                PointField("y", 4, PointField.FLOAT32, 1),
+                PointField("z", 8, PointField.FLOAT32, 1),
+                PointField("intensity", 12, PointField.FLOAT32, 1),
+            ]
+            pcl_msg = point_cloud2.create_cloud(
+                Header(frame_id="base_link", stamp=timestamp), fields, points
+            )
 
-        header = Header()
-        header.frame_id = "velodyne"
-        header.stamp = timestamp
+            bag.write("/lidar/{}/pointcloud".format(lidar_name), pcl_msg, t=pcl_msg.header.stamp)
 
-        fields = [
-            PointField("x", 0, PointField.FLOAT32, 1),
-            PointField("y", 4, PointField.FLOAT32, 1),
-            PointField("z", 8, PointField.FLOAT32, 1),
-            PointField("intensity", 12, PointField.FLOAT32, 1),
-        ]
-        pcl_msg = pcl2.create_cloud(header, fields, point_cloud)
+        concat_points = []
+        for lidar_id, lidar_name in SELECTED_LIDAR_SENSOR.items():
+            points = np.concatenate(
+                ret_dict["points_{}_0".format(lidar_id)]
+                + ret_dict["points_{}_1".format(lidar_id)],
+                axis=0,
+            )
+            intensity = np.concatenate(
+                ret_dict["intensity_{}_0".format(lidar_id)]
+                + ret_dict["intensity_{}_1".format(lidar_id)],
+                axis=0,
+            )
 
-        bag.write("/points_raw", pcl_msg, t=pcl_msg.header.stamp)
+            if NORMALIZE_INTENSITY:
+                intensity = np.tanh(intensity)
+
+            # concatenate x, y, z and intensity
+            points = np.column_stack((points, intensity))
+            concat_points.append(points)
+
+            write_points_to_bag(points, lidar_name)
+
+        write_points_to_bag(np.concatenate(concat_points, axis=0), "concatenated")
 
 
 def convert_range_image_to_point_cloud(
@@ -206,8 +250,6 @@ def convert_range_image_to_point_cloud(
     )
 
     for c in calibrations:
-        if c.name not in SELECTED_LIDAR_SENSOR:
-            continue
         for ri_index in ri_indexes:
             range_image = range_images[c.name][ri_index]
             if len(c.beam_inclinations) == 0:
@@ -250,20 +292,28 @@ def convert_range_image_to_point_cloud(
                 range_image_cartesian, tf.compat.v1.where(range_image_mask)
             )
 
-            ret_dict["points{}".format(ri_index)].append(points_tensor.numpy())
+            ret_dict["points_{}_{}".format(c.name, ri_index)].append(points_tensor.numpy())
 
             # Note: channel 1 is intensity
             # https://github.com/waymo-research/waymo-open-dataset/blob/master/waymo_open_dataset/dataset.proto#L176
             intensity_tensor = tf.gather_nd(range_image_tensor[..., 1], tf.where(range_image_mask))
-            ret_dict["intensity{}".format(ri_index)].append(intensity_tensor.numpy())
+            ret_dict["intensity_{}_{}".format(c.name, ri_index)].append(intensity_tensor.numpy())
 
     return ret_dict
 
 
 def waymo2bag():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--load_dir", help="directory to load Waymo Open Dataset tfrecords")
-    parser.add_argument("--save_dir", help="directory to save converted rosbag data")
+    parser.add_argument(
+        "--load_dir",
+        default="/data/tfrecord",
+        help="directory to load Waymo Open Dataset tfrecords",
+    )
+    parser.add_argument(
+        "--save_dir",
+        default="/data/rosbag",
+        help="directory to save converted rosbag1 data",
+    )
     args = parser.parse_args()
 
     converter = Waymo2Bag(args.load_dir, args.save_dir)
